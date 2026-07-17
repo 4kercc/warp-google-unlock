@@ -499,20 +499,32 @@ do_stop() {
 
 # 显示菜单
 show_menu() {
-    echo -e "${YELLOW}请选择操作:${NC}\n"
-    echo -e "  ${GREEN}1.${NC} 安装 WARP (解锁 Gemini和商店等)"
-    echo -e "  ${GREEN}2.${NC} 卸载 WARP"
-    echo -e "  ${GREEN}3.${NC} 查看状态"
-    echo -e "  ${GREEN}0.${NC} 退出\n"
-    
-    read -p "请输入选项 [0-3]: " choice
-    
+    local choice=""
+
+    # 如果传入了命令行参数，直接使用；否则进入交互模式
+    if [[ -n "$1" ]]; then
+        choice="$1"
+    else
+        echo -e "${YELLOW}请选择操作:${NC}\n"
+        echo -e "  ${GREEN}1.${NC} 安装 WARP (解锁 Gemini和商店等)"
+        echo -e "  ${GREEN}2.${NC} 卸载 WARP"
+        echo -e "  ${GREEN}3.${NC} 查看状态"
+        echo -e "  ${GREEN}0.${NC} 退出\n"
+        read -p "请输入选项 [0-3]: " choice
+    fi
+
     case $choice in
         1) do_install ;;
         2) do_uninstall ;;
         3) do_status; do_show_ip; do_test_google ;;
         0) echo -e "\n${GREEN}再见！${NC}\n"; exit 0 ;;
-        *) echo -e "\n${RED}无效选项${NC}\n" ;;
+        *)
+            echo -e "\n${RED}无效选项: '$choice'${NC}\n"
+            # 如果是通过命令行参数传入的无效值，直接退出并返回错误码
+            if [[ -n "$1" ]]; then
+                exit 1
+            fi
+            ;;
     esac
 }
 
