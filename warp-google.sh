@@ -548,7 +548,7 @@ main() {
     ARCH=$(dpkg --print-architecture 2>/dev/null || echo "amd64")
     echo -e "${GREEN}系统: $OS $VERSION ($CODENAME) $ARCH${NC}\n"
     
-    show_menu
+    show_menu "$@"
 }
 
-main
+main "$@"
