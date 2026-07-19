@@ -3,7 +3,6 @@
 > 基于 Cloudflare WARP 实现 Google、Netflix、ChatGPT 等服务的**全局透明代理解锁**，无需客户端配置，服务器级别自动路由，支持 IP 列表每 7 天自动从 BGP 数据库更新。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Platform](https://img.shields.io/badge/Platform-Ubuntu%20%7C%20Debian%20%7C%20CentOS%20%7C%20RHEL-blue.svg)]()
 [![Shell](https://img.shields.io/badge/Shell-Bash-green.svg)]()
 
 ---
@@ -40,7 +39,7 @@
 ### 一键安装
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/4kercc/warp-unlock/main/warp-google.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/4kercc/warp-google-unlock/main/warp-google.sh)
 ```
 
 
