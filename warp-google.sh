@@ -122,7 +122,7 @@ configure_warp() {
 }
 
 # 配置透明代理 (让 Google 流量自动走 WARP)
-setup_transparent_proxy() {
+setup_transparent_proxy_google() {
     echo -e "\n${CYAN}[3/3] 配置透明代理规则...${NC}"
     
     # 禁用 IPv6 访问 Google（避免 IPv4/IPv6 不匹配导致被检测）
@@ -171,11 +171,11 @@ redsocks {
 EOF
 
     # 创建 iptables 规则脚本
-    cat > /usr/local/bin/warp-google << 'SCRIPT'
-#!/bin/bash
+    #!/bin/bash
 
-# Google IP 段
-GOOGLE_IPS="
+# Service IP definitions (add or modify as needed)
+declare -A SERVICE_IPS
+SERVICE_IPS[google]="
 8.8.4.0/24
 8.8.8.0/24
 34.0.0.0/9
@@ -198,35 +198,98 @@ GOOGLE_IPS="
 216.58.192.0/19
 216.239.32.0/19
 "
+# ChatGPT / OpenAI (AS401518) - 来源: RIPE NCC BGP, 2026-07-19
+# OpenAI 自有 IP 段极少，主要通过 Cloudflare(AS13335) 提供 chat.openai.com 服务
+# 建议同时覆盖 Cloudflare 的部分 IP 以确保解锁效果
+SERVICE_IPS[chatgpt]="
+199.47.142.0/23
+104.16.0.0/13
+104.24.0.0/14
+"
+
+# Netflix (AS2906) - 来源: RIPE NCC BGP, 2026-07-19
+# 以下为聚合主干段，覆盖 Netflix 全球 CDN 核心 IP
+SERVICE_IPS[netflix]="
+23.246.0.0/18
+37.77.184.0/21
+45.57.0.0/17
+64.120.128.0/17
+66.197.128.0/17
+69.53.224.0/19
+108.175.32.0/20
+185.2.220.0/22
+185.9.188.0/22
+192.173.64.0/18
+198.38.96.0/19
+198.45.48.0/20
+207.45.72.0/22
+208.75.76.0/22
+"
+
+# 动态从 RIPE NCC API 更新指定 ASN 的 IPv4 前缀
+update_asn_ips() {
+    local svc="$1"
+    local asn="$2"
+    echo "正在从 RIPE NCC 更新 $svc (AS$asn) 的 IP 列表..."
+    local result
+    result=$(curl -sf --max-time 15 "https://stat.ripe.net/data/announced-prefixes/data.json?resource=AS${asn}" 2>/dev/null)
+    if [ -z "$result" ]; then
+        echo "  警告: 无法获取 AS$asn 数据，使用内置 IP 列表"
+        return
+    fi
+    # 提取 IPv4 前缀（过滤 IPv6）
+    local ipv4list
+    ipv4list=$(echo "$result" | tr ',' '\n' | grep -oP '"prefix":"\K[0-9][^"]+' | grep -v ':')
+    if [ -n "$ipv4list" ]; then
+        SERVICE_IPS[$svc]="$ipv4list"
+        local count
+        count=$(echo "$ipv4list" | wc -l)
+        echo "  已更新 $svc: 共 $count 个 IPv4 前缀"
+    else
+        echo "  警告: 未解析到 IPv4 前缀，使用内置 IP 列表"
+    fi
+}
 
 start() {
-    echo "启动 Google 透明代理..."
-    
+    echo "启动多服务透明代理..."
+
+    # 动态更新 IP（可选，需要 curl 和网络访问）
+    if command -v curl &>/dev/null; then
+        update_asn_ips google  15169   # Google LLC (主 ASN)
+        update_asn_ips netflix 2906
+        update_asn_ips chatgpt 401518
+    fi
+
     # 启动 redsocks
-    pkill redsocks 2>/dev/null
+    pkill redsocks 2>/dev/null || true
     redsocks -c /etc/redsocks.conf
-    
-    # 创建新的 iptables 链
-    iptables -t nat -N WARP_GOOGLE 2>/dev/null || iptables -t nat -F WARP_GOOGLE
-    
-    # 添加 Google IP 规则
-    for ip in $GOOGLE_IPS; do
-        iptables -t nat -A WARP_GOOGLE -d $ip -p tcp -j REDIRECT --to-ports 12345
+
+    # 为每个服务创建 iptables 链并添加规则
+    for svc in "${!SERVICE_IPS[@]}"; do
+        chain="WARP_${svc^^}"
+        iptables -t nat -N "$chain" 2>/dev/null || iptables -t nat -F "$chain"
+        iplist=${SERVICE_IPS[$svc]}
+        local count=0
+        for ip in $iplist; do
+            iptables -t nat -A "$chain" -d $ip -p tcp -j REDIRECT --to-ports 12345
+            ((count++))
+        done
+        iptables -t nat -C OUTPUT -j "$chain" 2>/dev/null || iptables -t nat -A OUTPUT -j "$chain"
+        echo "  $svc: 已添加 $count 条规则"
     done
-    
-    # 应用到 OUTPUT 链
-    iptables -t nat -C OUTPUT -j WARP_GOOGLE 2>/dev/null || iptables -t nat -A OUTPUT -j WARP_GOOGLE
-    
-    echo "Google 透明代理已启动"
+    echo "多服务透明代理已启动"
 }
 
 stop() {
-    echo "停止 Google 透明代理..."
-    pkill redsocks 2>/dev/null
-    iptables -t nat -D OUTPUT -j WARP_GOOGLE 2>/dev/null
-    iptables -t nat -F WARP_GOOGLE 2>/dev/null
-    iptables -t nat -X WARP_GOOGLE 2>/dev/null
-    echo "Google 透明代理已停止"
+    echo "停止多服务透明代理..."
+    pkill redsocks 2>/dev/null || true
+    for svc in "${!SERVICE_IPS[@]}"; do
+        chain="WARP_${svc^^}"
+        iptables -t nat -D OUTPUT -j "$chain" 2>/dev/null
+        iptables -t nat -F "$chain" 2>/dev/null
+        iptables -t nat -X "$chain" 2>/dev/null
+    done
+    echo "多服务透明代理已停止"
 }
 
 status() {
@@ -237,7 +300,11 @@ status() {
     pgrep -x redsocks >/dev/null && echo "运行中" || echo "未运行"
     echo ""
     echo "=== iptables 规则 ==="
-    iptables -t nat -L WARP_GOOGLE -n 2>/dev/null | head -5 || echo "无规则"
+    for svc in "${!SERVICE_IPS[@]}"; do
+        chain="WARP_${svc^^}"
+        echo "--- $svc ---"
+        iptables -t nat -L "$chain" -n 2>/dev/null | head -5 || echo "无规则"
+    done
 }
 
 case "$1" in
@@ -247,7 +314,6 @@ case "$1" in
     status) status ;;
     *) echo "用法: $0 {start|stop|restart|status}" ;;
 esac
-SCRIPT
 
     chmod +x /usr/local/bin/warp-google
     
@@ -272,7 +338,35 @@ EOF
 
     systemctl daemon-reload
     systemctl enable warp-google 2>/dev/null
-    
+
+    # 创建每 7 天自动重启的 systemd timer（用于定期刷新 BGP IP 列表）
+    cat > /etc/systemd/system/warp-google-update.service << 'EOF'
+[Unit]
+Description=WARP Transparent Proxy Weekly IP Update
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/warp-google restart
+EOF
+
+    cat > /etc/systemd/system/warp-google-update.timer << 'EOF'
+[Unit]
+Description=WARP IP List Weekly Auto-Update
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=7d
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable --now warp-google-update.timer 2>/dev/null
+    echo -e "${GREEN}✓ 已启用每 7 天自动更新 IP 列表的定时任务${NC}"
     echo -e "${GREEN}✓ 透明代理配置完成${NC}"
 }
 
@@ -372,13 +466,32 @@ do_install() {
     setup_transparent_proxy
     create_management
     test_connection
-    
+
     echo -e "\n${GREEN}╔════════════════════════════════════════════════════╗${NC}"
-    echo -e "${GREEN}║            🎉 安装完成！Google 已解锁 🎉            ║${NC}"
+    echo -e "${GREEN}║          🎉 安装完成！多服务已解锁 🎉               ║${NC}"
     echo -e "${GREEN}╚════════════════════════════════════════════════════╝${NC}"
-    echo -e "\n${YELLOW}所有 Google 流量现已自动通过 WARP！${NC}"
-    echo -e "${YELLOW}无需任何额外配置，直接访问即可。${NC}"
-    echo -e "\n管理命令: ${CYAN}warp {status|start|stop|restart|test|ip|uninstall}${NC}\n"
+    echo -e "\n${YELLOW}所有 Google / Netflix / ChatGPT 流量现已自动通过 WARP！${NC}"
+    echo -e "${YELLOW}IP 列表每 7 天自动从 BGP 数据库刷新，无需手动维护。${NC}\n"
+
+    # 开机自启状态检查
+    echo -e "${CYAN}══════ 开机自启状态 ══════${NC}"
+    if systemctl is-enabled warp-google &>/dev/null; then
+        echo -e "  warp-google.service    : ${GREEN}✓ 已开机自启${NC}"
+    else
+        echo -e "  warp-google.service    : ${RED}✗ 未开机自启${NC}（运行 systemctl enable warp-google 修复）"
+    fi
+    if systemctl is-enabled warp-svc &>/dev/null; then
+        echo -e "  warp-svc.service       : ${GREEN}✓ 已开机自启${NC}"
+    else
+        echo -e "  warp-svc.service       : ${YELLOW}⚠ 未检测到（可能需要手动启用）${NC}"
+    fi
+    if systemctl is-enabled warp-google-update.timer &>/dev/null; then
+        echo -e "  warp-google-update.timer: ${GREEN}✓ 每 7 天自动更新 IP${NC}"
+    else
+        echo -e "  warp-google-update.timer: ${RED}✗ 定时更新未启用${NC}"
+    fi
+
+    echo -e "\n${CYAN}管理命令: warp {status|start|stop|restart|test|ip|update|uninstall}${NC}\n"
 }
 
 # 卸载
@@ -386,21 +499,27 @@ do_uninstall() {
     echo -e "\n${YELLOW}正在卸载 WARP...${NC}"
     /usr/local/bin/warp-google stop 2>/dev/null
     warp-cli disconnect 2>/dev/null
-    systemctl disable warp-google 2>/dev/null
+    systemctl disable --now warp-google 2>/dev/null
+    systemctl disable --now warp-google-update.timer 2>/dev/null
     systemctl stop warp-svc 2>/dev/null
     rm -f /etc/systemd/system/warp-google.service
+    rm -f /etc/systemd/system/warp-google-update.service
+    rm -f /etc/systemd/system/warp-google-update.timer
     rm -f /usr/local/bin/warp-google
     rm -f /usr/local/bin/warp
     rm -f /etc/redsocks.conf
-    
-    # 清理 iptables 规则
-    iptables -t nat -D OUTPUT -j WARP_GOOGLE 2>/dev/null
-    iptables -t nat -F WARP_GOOGLE 2>/dev/null
-    iptables -t nat -X WARP_GOOGLE 2>/dev/null
-    
+    systemctl daemon-reload
+
+    # 清理所有 iptables 链（兼容多服务命名）
+    for chain in WARP_GOOGLE WARP_NETFLIX WARP_CHATGPT; do
+        iptables -t nat -D OUTPUT -j "$chain" 2>/dev/null
+        iptables -t nat -F "$chain" 2>/dev/null
+        iptables -t nat -X "$chain" 2>/dev/null
+    done
+
     # 删除 IPv6 黑洞路由
     ip -6 route del blackhole 2607:f8b0::/32 2>/dev/null
-    
+
     # 卸载软件包
     case $OS in
         ubuntu|debian)
@@ -412,7 +531,7 @@ do_uninstall() {
             rm -f /etc/yum.repos.d/cloudflare-warp.repo
             ;;
     esac
-    
+
     echo -e "${GREEN}✓ WARP 已完全卸载${NC}\n"
 }
 
