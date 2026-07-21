@@ -122,7 +122,7 @@ configure_warp() {
 }
 
 # 配置透明代理 (让 Google 流量自动走 WARP)
-setup_transparent_proxy_google() {
+setup_transparent_proxy() {
     echo -e "\n${CYAN}[3/3] 配置透明代理规则...${NC}"
     
     # 禁用 IPv6 访问 Google（避免 IPv4/IPv6 不匹配导致被检测）
@@ -171,7 +171,8 @@ redsocks {
 EOF
 
     # 创建 iptables 规则脚本
-    #!/bin/bash
+    cat > /usr/local/bin/warp-google << 'SCRIPT'
+#!/bin/bash
 
 # Service IP definitions (add or modify as needed)
 declare -A SERVICE_IPS
@@ -314,6 +315,7 @@ case "$1" in
     status) status ;;
     *) echo "用法: $0 {start|stop|restart|status}" ;;
 esac
+SCRIPT
 
     chmod +x /usr/local/bin/warp-google
     
@@ -369,6 +371,14 @@ EOF
     echo -e "${GREEN}✓ 已启用每 7 天自动更新 IP 列表的定时任务${NC}"
     echo -e "${GREEN}✓ 透明代理配置完成${NC}"
 }
+
+# 兼容旧版函数名，避免不同版本脚本调用不一致
+if ! declare -F setup_transparent_proxy >/dev/null && declare -F setup_transparent_proxy_google >/dev/null; then
+    setup_transparent_proxy() { setup_transparent_proxy_google "$@"; }
+fi
+if ! declare -F setup_transparent_proxy_google >/dev/null && declare -F setup_transparent_proxy >/dev/null; then
+    setup_transparent_proxy_google() { setup_transparent_proxy "$@"; }
+fi
 
 # 测试连接
 test_connection() {
