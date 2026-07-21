@@ -43,15 +43,29 @@ IP_INFO=$(curl -s --max-time 5 "http://ip-api.com/json/$CURRENT_IP?lang=zh-CN" 2
 echo -e "IP: ${GREEN}$CURRENT_IP${NC}"
 echo -e "位置: ${GREEN}$(echo $IP_INFO | grep -oP '"country":"\K[^"]+') - $(echo $IP_INFO | grep -oP '"city":"\K[^"]+')${NC}"
 
-# 安装 Cloudflare WARP 官方客户端
 install_warp() {
-    echo -e "\n${CYAN}[1/3] 安装 Cloudflare WARP 官方客户端...${NC}"
+    echo -e "\n${CYAN}[1/3] 检测/安装 Cloudflare WARP 官方客户端...${NC}"
+    
+    if command -v warp-cli &>/dev/null; then
+        echo -e "${GREEN}✓ WARP 客户端已安装，跳过安装步骤${NC}"
+        return
+    fi
     
     case $OS in
         ubuntu|debian)
-            # 先安装必要依赖
-            apt-get update -y >/dev/null 2>&1
-            apt-get install -y gnupg curl wget lsb-release >/dev/null 2>&1
+            # 检查并仅安装缺失的必备依赖，避免不必要的 apt-get update
+            local missing_pkgs=()
+            for pkg in gnupg curl wget; do
+                if ! dpkg -s "$pkg" &>/dev/null; then
+                    missing_pkgs+=("$pkg")
+                fi
+            done
+            
+            if [ ${#missing_pkgs[@]} -gt 0 ]; then
+                echo -e "正在安装缺失的依赖: ${missing_pkgs[*]}..."
+                apt-get update -y >/dev/null 2>&1
+                apt-get install -y "${missing_pkgs[@]}" >/dev/null 2>&1
+            fi
             
             # 添加 Cloudflare GPG 密钥
             curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
@@ -59,7 +73,7 @@ install_warp() {
             # 添加仓库
             echo "deb [arch=$ARCH signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $CODENAME main" > /etc/apt/sources.list.d/cloudflare-client.list
             
-            # 安装
+            # 安装 Cloudflare WARP (由于新加了仓库，需要 update)
             apt-get update -y
             apt-get install -y cloudflare-warp
             ;;
@@ -140,13 +154,31 @@ setup_transparent_proxy() {
     # 安装 redsocks (透明代理工具)
     case $OS in
         ubuntu|debian)
-            apt-get install -y redsocks iptables >/dev/null 2>&1
+            local missing_proxy_pkgs=()
+            for pkg in redsocks iptables; do
+                if ! dpkg -s "$pkg" &>/dev/null; then
+                    missing_proxy_pkgs+=("$pkg")
+                fi
+            done
+            if [ ${#missing_proxy_pkgs[@]} -gt 0 ]; then
+                echo -e "正在安装依赖: ${missing_proxy_pkgs[*]}..."
+                apt-get install -y "${missing_proxy_pkgs[@]}" >/dev/null 2>&1
+            fi
             ;;
         centos|rhel|rocky|almalinux|fedora)
-            if command -v dnf &>/dev/null; then
-                dnf install -y redsocks iptables >/dev/null 2>&1
-            else
-                yum install -y redsocks iptables >/dev/null 2>&1
+            local missing_proxy_pkgs=()
+            for pkg in redsocks iptables; do
+                if ! rpm -q "$pkg" &>/dev/null; then
+                    missing_proxy_pkgs+=("$pkg")
+                fi
+            done
+            if [ ${#missing_proxy_pkgs[@]} -gt 0 ]; then
+                echo -e "正在安装依赖: ${missing_proxy_pkgs[*]}..."
+                if command -v dnf &>/dev/null; then
+                    dnf install -y "${missing_proxy_pkgs[@]}" >/dev/null 2>&1
+                else
+                    yum install -y "${missing_proxy_pkgs[@]}" >/dev/null 2>&1
+                fi
             fi
             ;;
     esac
