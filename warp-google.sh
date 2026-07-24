@@ -207,21 +207,16 @@ EOF
 #!/bin/bash
 
 # Service IP definitions (add or modify as needed)
+# 安全原则：只劫持明确服务网段；不使用过大的 Cloudflare / Google ASN 全量网段，避免代理环或误伤业务流量。
 declare -A SERVICE_IPS
 SERVICE_IPS[google]="
 8.8.4.0/24
 8.8.8.0/24
-34.0.0.0/9
-35.184.0.0/13
-35.192.0.0/12
-35.224.0.0/12
-35.240.0.0/13
 64.233.160.0/19
 66.102.0.0/20
 66.249.64.0/19
 72.14.192.0/18
 74.125.0.0/16
-104.132.0.0/14
 108.177.0.0/17
 142.250.0.0/15
 172.217.0.0/16
@@ -231,17 +226,13 @@ SERVICE_IPS[google]="
 216.58.192.0/19
 216.239.32.0/19
 "
-# ChatGPT / OpenAI (AS401518) - 来源: RIPE NCC BGP, 2026-07-19
-# OpenAI 自有 IP 段极少，主要通过 Cloudflare(AS13335) 提供 chat.openai.com 服务
-# 建议同时覆盖 Cloudflare 的部分 IP 以确保解锁效果
+
+# ChatGPT / OpenAI：只保留 OpenAI 自有段；不默认劫持 Cloudflare 大段，避免影响大量站点和 WARP 自身连接。
 SERVICE_IPS[chatgpt]="
 199.47.142.0/23
-104.16.0.0/13
-104.24.0.0/14
 "
 
-# Netflix (AS2906) - 来源: RIPE NCC BGP, 2026-07-19
-# 以下为聚合主干段，覆盖 Netflix 全球 CDN 核心 IP
+# Netflix (AS2906) - 聚合主干段
 SERVICE_IPS[netflix]="
 23.246.0.0/18
 37.77.184.0/21
@@ -259,7 +250,20 @@ SERVICE_IPS[netflix]="
 208.75.76.0/22
 "
 
-# 动态从 RIPE NCC API 更新指定 ASN 的 IPv4 前缀
+EXCLUDE_IPS="
+0.0.0.0/8
+10.0.0.0/8
+100.64.0.0/10
+127.0.0.0/8
+169.254.0.0/16
+172.16.0.0/12
+192.168.0.0/16
+224.0.0.0/4
+240.0.0.0/4
+"
+
+# 动态从 RIPE NCC API 更新指定 ASN 的 IPv4 前缀。
+# 默认关闭；如确实需要全量 ASN，可手动执行：WARP_DYNAMIC_UPDATE=1 warp-google restart
 update_asn_ips() {
     local svc="$1"
     local asn="$2"
@@ -270,7 +274,6 @@ update_asn_ips() {
         echo "  警告: 无法获取 AS$asn 数据，使用内置 IP 列表"
         return
     fi
-    # 提取 IPv4 前缀（过滤 IPv6）
     local ipv4list
     ipv4list=$(echo "$result" | tr ',' '\n' | grep -oP '"prefix":"\K[0-9][^"]+' | grep -v ':')
     if [ -n "$ipv4list" ]; then
@@ -283,51 +286,90 @@ update_asn_ips() {
     fi
 }
 
+cleanup_rules() {
+    for svc in "${!SERVICE_IPS[@]}"; do
+        chain="WARP_${svc^^}"
+        iptables -t nat -D OUTPUT -j "$chain" 2>/dev/null || true
+        iptables -t nat -F "$chain" 2>/dev/null || true
+        iptables -t nat -X "$chain" 2>/dev/null || true
+    done
+}
+
+check_proxy_ready() {
+    if ! command -v curl &>/dev/null; then
+        echo "  警告: 未找到 curl，跳过 SOCKS5 健康检查"
+        return 0
+    fi
+    curl -x socks5h://127.0.0.1:40000 -s --max-time 8 https://www.cloudflare.com/cdn-cgi/trace >/dev/null 2>&1
+}
+
 start() {
     echo "启动多服务透明代理..."
 
-    # 动态更新 IP（可选，需要 curl 和网络访问）
-    if command -v curl &>/dev/null; then
-        update_asn_ips google  15169   # Google LLC (主 ASN)
+    if [ "${WARP_DYNAMIC_UPDATE:-0}" = "1" ] && command -v curl &>/dev/null; then
+        echo "已启用动态 ASN 更新。注意：全量 ASN 可能误伤更多流量。"
+        update_asn_ips google 15169
         update_asn_ips netflix 2906
         update_asn_ips chatgpt 401518
+    else
+        echo "使用内置安全 IP 列表（未启用全量 ASN 动态更新）"
     fi
 
-    # 启动 redsocks
     pkill redsocks 2>/dev/null || true
     redsocks -c /etc/redsocks.conf
+    sleep 1
 
-    # 为每个服务创建 iptables 链并添加规则
+    if ! pgrep -x redsocks >/dev/null; then
+        echo "错误: redsocks 未能启动，已取消添加 iptables 规则，避免网络异常"
+        exit 1
+    fi
+
+    if ! check_proxy_ready; then
+        echo "错误: WARP SOCKS5 代理 127.0.0.1:40000 不可用，已取消添加 iptables 规则"
+        pkill redsocks 2>/dev/null || true
+        exit 1
+    fi
+
+    cleanup_rules
+
     for svc in "${!SERVICE_IPS[@]}"; do
         chain="WARP_${svc^^}"
         iptables -t nat -N "$chain" 2>/dev/null || iptables -t nat -F "$chain"
+
+        # 防误伤：本机、私网、链路本地、CGNAT、多播/保留地址直接放行。
+        for ip in $EXCLUDE_IPS; do
+            iptables -t nat -A "$chain" -d "$ip" -j RETURN
+        done
+
         iplist=${SERVICE_IPS[$svc]}
         local count=0
         for ip in $iplist; do
-            iptables -t nat -A "$chain" -d $ip -p tcp -j REDIRECT --to-ports 12345
+            iptables -t nat -A "$chain" -d "$ip" -p tcp -j REDIRECT --to-ports 12345
             ((count++))
         done
         iptables -t nat -C OUTPUT -j "$chain" 2>/dev/null || iptables -t nat -A OUTPUT -j "$chain"
-        echo "  $svc: 已添加 $count 条规则"
+        echo "  $svc: 已添加 $count 条劫持规则"
     done
     echo "多服务透明代理已启动"
 }
 
 stop() {
     echo "停止多服务透明代理..."
+    cleanup_rules
     pkill redsocks 2>/dev/null || true
-    for svc in "${!SERVICE_IPS[@]}"; do
-        chain="WARP_${svc^^}"
-        iptables -t nat -D OUTPUT -j "$chain" 2>/dev/null
-        iptables -t nat -F "$chain" 2>/dev/null
-        iptables -t nat -X "$chain" 2>/dev/null
-    done
     echo "多服务透明代理已停止"
 }
 
 status() {
     echo "=== WARP 状态 ==="
     warp-cli status 2>/dev/null || echo "WARP 未运行"
+    echo ""
+    echo "=== SOCKS5 健康检查 ==="
+    if check_proxy_ready; then
+        echo "127.0.0.1:40000 可用"
+    else
+        echo "127.0.0.1:40000 不可用"
+    fi
     echo ""
     echo "=== Redsocks 状态 ==="
     pgrep -x redsocks >/dev/null && echo "运行中" || echo "未运行"
@@ -336,7 +378,7 @@ status() {
     for svc in "${!SERVICE_IPS[@]}"; do
         chain="WARP_${svc^^}"
         echo "--- $svc ---"
-        iptables -t nat -L "$chain" -n 2>/dev/null | head -5 || echo "无规则"
+        iptables -t nat -L "$chain" -n 2>/dev/null | head -8 || echo "无规则"
     done
 }
 
@@ -345,7 +387,8 @@ case "$1" in
     stop) stop ;;
     restart) stop; sleep 1; start ;;
     status) status ;;
-    *) echo "用法: $0 {start|stop|restart|status}" ;;
+    update) WARP_DYNAMIC_UPDATE=1; stop; sleep 1; start ;;
+    *) echo "用法: $0 {start|stop|restart|status|update}" ;;
 esac
 SCRIPT
 
@@ -373,10 +416,10 @@ EOF
     systemctl daemon-reload
     systemctl enable warp-google 2>/dev/null
 
-    # 创建每 7 天自动重启的 systemd timer（用于定期刷新 BGP IP 列表）
+    # 创建每 7 天自动重启的 systemd timer（仅重载安全内置列表；不会默认拉取全量 ASN）
     cat > /etc/systemd/system/warp-google-update.service << 'EOF'
 [Unit]
-Description=WARP Transparent Proxy Weekly IP Update
+Description=WARP Transparent Proxy Weekly Safe Restart
 After=network-online.target
 Wants=network-online.target
 
@@ -387,7 +430,7 @@ EOF
 
     cat > /etc/systemd/system/warp-google-update.timer << 'EOF'
 [Unit]
-Description=WARP IP List Weekly Auto-Update
+Description=WARP Transparent Proxy Weekly Safe Restart
 
 [Timer]
 OnBootSec=10min
@@ -400,7 +443,7 @@ EOF
 
     systemctl daemon-reload
     systemctl enable --now warp-google-update.timer 2>/dev/null
-    echo -e "${GREEN}✓ 已启用每 7 天自动更新 IP 列表的定时任务${NC}"
+    echo -e "${GREEN}✓ 已启用每 7 天安全重载透明代理的定时任务${NC}"
     echo -e "${GREEN}✓ 透明代理配置完成${NC}"
 }
 
@@ -458,9 +501,9 @@ case "$1" in
         sleep 2
         $0 start
         ;;
-    test)
-        echo "测试 Google 连接..."
-        curl -s --max-time 10 -o /dev/null -w "状态码: %{http_code}\n" https://www.google.com
+    check|test)
+        echo "正在运行多服务解锁综合检测..."
+        /usr/local/bin/warp-google check
         ;;
     ip)
         echo "直连 IP:"
@@ -470,15 +513,24 @@ case "$1" in
         curl -x socks5://127.0.0.1:40000 -s ip.sb
         echo ""
         ;;
+    update)
+        echo "全量 ASN 更新 IP 列表并重启透明代理..."
+        echo "提示: 全量 ASN 可能劫持更多流量，如网络异常请执行: warp stop"
+        /usr/local/bin/warp-google update
+        ;;
     uninstall)
         echo "正在卸载..."
         /usr/local/bin/warp-google stop 2>/dev/null
         warp-cli disconnect 2>/dev/null
-        systemctl disable warp-google 2>/dev/null
+        systemctl disable --now warp-google 2>/dev/null
+        systemctl disable --now warp-google-update.timer 2>/dev/null
         rm -f /etc/systemd/system/warp-google.service
+        rm -f /etc/systemd/system/warp-google-update.service
+        rm -f /etc/systemd/system/warp-google-update.timer
         rm -f /usr/local/bin/warp-google
         rm -f /usr/local/bin/warp
         rm -f /etc/redsocks.conf
+        systemctl daemon-reload 2>/dev/null
         apt-get remove -y cloudflare-warp redsocks 2>/dev/null || yum remove -y cloudflare-warp redsocks 2>/dev/null
         echo "WARP 已卸载"
         ;;
@@ -489,11 +541,13 @@ case "$1" in
         echo ""
         echo "命令:"
         echo "  status    查看状态"
+        echo "  check     检测多服务解锁状态 (Google/Gemini/ChatGPT/Netflix/Claude)"
         echo "  start     启动 WARP"
         echo "  stop      停止 WARP"
         echo "  restart   重启 WARP"
-        echo "  test      测试 Google"
+        echo "  test      测试解锁状态 (同 check)"
         echo "  ip        查看 IP"
+        echo "  update    全量 ASN 更新 IP 列表（高级功能）"
         echo "  uninstall 卸载 WARP"
         ;;
 esac
@@ -512,8 +566,8 @@ do_install() {
     echo -e "\n${GREEN}╔════════════════════════════════════════════════════╗${NC}"
     echo -e "${GREEN}║          🎉 安装完成！多服务已解锁 🎉               ║${NC}"
     echo -e "${GREEN}╚════════════════════════════════════════════════════╝${NC}"
-    echo -e "\n${YELLOW}所有 Google / Netflix / ChatGPT 流量现已自动通过 WARP！${NC}"
-    echo -e "${YELLOW}IP 列表每 7 天自动从 BGP 数据库刷新，无需手动维护。${NC}\n"
+    echo -e "\n${YELLOW}Google / Netflix / ChatGPT 指定 IP 流量现已自动通过 WARP！${NC}"
+    echo -e "${YELLOW}默认使用安全内置 IP 列表；如需全量 ASN 更新，可手动执行 warp update。${NC}\n"
 
     # 开机自启状态检查
     echo -e "${CYAN}══════ 开机自启状态 ══════${NC}"
@@ -631,15 +685,69 @@ do_show_ip() {
     echo -e "${CYAN}══════════════════════════════════════${NC}\n"
 }
 
-# 测试 Google 连接
+# 综合多服务解锁检测
+do_check_services() {
+    echo -e "\n${CYAN}══════════════ 🌐 多服务解锁综合检测 🌐 ══════════════${NC}\n"
+
+    local warp_proxy="socks5h://127.0.0.1:40000"
+
+    test_item() {
+        local name="$1"
+        local url="$2"
+        local match_type="$3" # http_code | body_not_contain | body_contain
+        local target="$4"
+        local use_warp="$5"
+
+        local curl_cmd=(curl -s -L --max-time 10 -A "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        if [ "$use_warp" = "1" ]; then
+            curl_cmd+=(-x "$warp_proxy")
+        fi
+
+        local res=""
+        if [ "$match_type" = "http_code" ]; then
+            res=$("${curl_cmd[@]}" -o /dev/null -w "%{http_code}" "$url" 2>/dev/null)
+            if [ "$res" = "$target" ]; then
+                echo -e "  ${name}: ${GREEN}✓ 已解锁 / 正常 (HTTP $res)${NC}"
+            else
+                echo -e "  ${name}: ${RED}✗ 受限或失败 (HTTP ${res:-超时})${NC}"
+            fi
+        elif [ "$match_type" = "body_not_contain" ]; then
+            res=$("${curl_cmd[@]}" "$url" 2>/dev/null)
+            if [ -z "$res" ]; then
+                echo -e "  ${name}: ${RED}✗ 请求失败 (无响应)${NC}"
+            elif echo "$res" | grep -qi "$target"; then
+                echo -e "  ${name}: ${RED}✗ 受限 / 被地区屏蔽${NC}"
+            else
+                echo -e "  ${name}: ${GREEN}✓ 已解锁 / 正常${NC}"
+            fi
+        elif [ "$match_type" = "body_contain" ]; then
+            res=$("${curl_cmd[@]}" "$url" 2>/dev/null)
+            if echo "$res" | grep -qi "$target"; then
+                echo -e "  ${name}: ${GREEN}✓ 已解锁 / 正常${NC}"
+            else
+                echo -e "  ${name}: ${RED}✗ 受限 / 未检测到有效响应${NC}"
+            fi
+        fi
+    }
+
+    echo -e "${YELLOW}【直连测试】${NC}"
+    test_item "Google 搜索    " "https://www.google.com" "http_code" "200" "0"
+    test_item "YouTube 访问   " "https://www.youtube.com" "http_code" "200" "0"
+
+    echo -e "\n${YELLOW}【透明代理 / WARP 解锁测试】${NC}"
+    test_item "Google 搜索    " "https://www.google.com" "http_code" "200" "1"
+    test_item "Gemini (AI)    " "https://gemini.google.com" "body_not_contain" "not available" "1"
+    test_item "ChatGPT Web    " "https://chatgpt.com" "body_not_contain" "blocked|sorry" "1"
+    test_item "OpenAI API     " "https://api.openai.com/v1/models" "body_not_contain" "country_unsupported" "1"
+    test_item "Netflix 地区   " "https://www.netflix.com/title/80018499" "http_code" "200" "1"
+    test_item "Claude (Anthropic)" "https://claude.ai" "body_not_contain" "not available|blocked" "1"
+
+    echo -e "\n${CYAN}════════════════════════════════════════════════════════${NC}\n"
+}
+
+# 兼容保留
 do_test_google() {
-    echo -e "\n${CYAN}测试 Google 连接...${NC}"
-    RESULT=$(curl -s --max-time 10 -o /dev/null -w "%{http_code}" https://www.google.com)
-    if [ "$RESULT" = "200" ]; then
-        echo -e "${GREEN}✓ Google 连接成功！状态码: $RESULT${NC}\n"
-    else
-        echo -e "${RED}✗ Google 连接失败，状态码: $RESULT${NC}\n"
-    fi
+    do_check_services
 }
 
 # 启动服务
@@ -669,15 +777,17 @@ show_menu() {
         echo -e "${YELLOW}请选择操作:${NC}\n"
         echo -e "  ${GREEN}1.${NC} 安装 WARP (解锁 Gemini和商店等)"
         echo -e "  ${GREEN}2.${NC} 卸载 WARP"
-        echo -e "  ${GREEN}3.${NC} 查看状态"
+        echo -e "  ${GREEN}3.${NC} 查看状态与 IP 信息"
+        echo -e "  ${GREEN}4.${NC} 多服务解锁综合检测 (Google/Gemini/ChatGPT/Netflix/Claude)"
         echo -e "  ${GREEN}0.${NC} 退出\n"
-        read -p "请输入选项 [0-3]: " choice
+        read -p "请输入选项 [0-4]: " choice
     fi
 
     case $choice in
         1) do_install ;;
         2) do_uninstall ;;
-        3) do_status; do_show_ip; do_test_google ;;
+        3) do_status; do_show_ip ;;
+        4|check|test) do_check_services ;;
         0) echo -e "\n${GREEN}再见！${NC}\n"; exit 0 ;;
         *)
             echo -e "\n${RED}无效选项: '$choice'${NC}\n"
