@@ -382,13 +382,79 @@ status() {
     done
 }
 
+check_services() {
+    RED='\033[0;31m'
+    GREEN='\033[0;32m'
+    YELLOW='\033[0;33m'
+    CYAN='\033[0;36m'
+    NC='\033[0m'
+
+    echo -e "\n${CYAN}══════════════ 🌐 多服务解锁综合检测 🌐 ══════════════${NC}\n"
+
+    local warp_proxy="socks5h://127.0.0.1:40000"
+
+    test_item() {
+        local name="$1"
+        local url="$2"
+        local match_type="$3"
+        local target="$4"
+        local use_warp="$5"
+
+        local curl_cmd=(curl -s -L --max-time 10 -A "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        if [ "$use_warp" = "1" ]; then
+            curl_cmd+=(-x "$warp_proxy")
+        fi
+
+        local res=""
+        if [ "$match_type" = "http_code" ]; then
+            res=$("${curl_cmd[@]}" -o /dev/null -w "%{http_code}" "$url" 2>/dev/null)
+            if [ "$res" = "$target" ]; then
+                echo -e "  ${name}: ${GREEN}✓ 已解锁 / 正常 (HTTP $res)${NC}"
+            else
+                echo -e "  ${name}: ${RED}✗ 受限或失败 (HTTP ${res:-超时})${NC}"
+            fi
+        elif [ "$match_type" = "body_not_contain" ]; then
+            res=$("${curl_cmd[@]}" "$url" 2>/dev/null)
+            if [ -z "$res" ]; then
+                echo -e "  ${name}: ${RED}✗ 请求失败 (无响应)${NC}"
+            elif echo "$res" | grep -qi "$target"; then
+                echo -e "  ${name}: ${RED}✗ 受限 / 被地区屏蔽${NC}"
+            else
+                echo -e "  ${name}: ${GREEN}✓ 已解锁 / 正常${NC}"
+            fi
+        elif [ "$match_type" = "body_contain" ]; then
+            res=$("${curl_cmd[@]}" "$url" 2>/dev/null)
+            if echo "$res" | grep -qi "$target"; then
+                echo -e "  ${name}: ${GREEN}✓ 已解锁 / 正常${NC}"
+            else
+                echo -e "  ${name}: ${RED}✗ 受限 / 未检测到有效响应${NC}"
+            fi
+        fi
+    }
+
+    echo -e "${YELLOW}【直连测试】${NC}"
+    test_item "Google 搜索    " "https://www.google.com" "http_code" "200" "0"
+    test_item "YouTube 访问   " "https://www.youtube.com" "http_code" "200" "0"
+
+    echo -e "\n${YELLOW}【透明代理 / WARP 解锁测试】${NC}"
+    test_item "Google 搜索    " "https://www.google.com" "http_code" "200" "1"
+    test_item "Gemini (AI)    " "https://gemini.google.com" "body_not_contain" "not available" "1"
+    test_item "ChatGPT Web    " "https://chatgpt.com" "body_not_contain" "blocked|sorry" "1"
+    test_item "OpenAI API     " "https://api.openai.com/v1/models" "body_not_contain" "country_unsupported" "1"
+    test_item "Netflix 地区   " "https://www.netflix.com/title/80018499" "http_code" "200" "1"
+    test_item "Claude (Anthropic)" "https://claude.ai" "body_not_contain" "not available|blocked" "1"
+
+    echo -e "\n${CYAN}════════════════════════════════════════════════════════${NC}\n"
+}
+
 case "$1" in
     start) start ;;
     stop) stop ;;
     restart) stop; sleep 1; start ;;
     status) status ;;
     update) WARP_DYNAMIC_UPDATE=1; stop; sleep 1; start ;;
-    *) echo "用法: $0 {start|stop|restart|status|update}" ;;
+    check|test) check_services ;;
+    *) echo "用法: $0 {start|stop|restart|status|update|check}" ;;
 esac
 SCRIPT
 
