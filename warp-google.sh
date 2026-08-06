@@ -110,8 +110,22 @@ EOF
 
 # 配置 WARP
 configure_warp() {
-    echo -e "\n${CYAN}[2/3] 配置 WARP...${NC}"
+    echo -e "\n${CYAN}[2/3] 配置 WARP 与内存限制...${NC}"
     
+    # 限制 warp-svc 内存最大 200M（防止系统资源耗尽及内存泄漏）
+    if [ -d /etc/systemd/system ]; then
+        mkdir -p /etc/systemd/system/warp-svc.service.d/
+        cat > /etc/systemd/system/warp-svc.service.d/override.conf << 'EOF'
+[Service]
+MemoryMax=200M
+MemoryHigh=150M
+Restart=always
+EOF
+        systemctl daemon-reload 2>/dev/null
+        systemctl restart warp-svc 2>/dev/null || true
+        echo -e "${GREEN}✓ 已配置 warp-svc 内存上限 (MemoryMax=200M)${NC}"
+    fi
+
     # 注册设备
     echo -e "正在注册设备..."
     warp-cli --accept-tos registration new 2>/dev/null || warp-cli --accept-tos register 2>/dev/null || true
@@ -122,6 +136,9 @@ configure_warp() {
     # 设置代理端口
     warp-cli --accept-tos proxy port 40000 2>/dev/null || warp-cli proxy port 40000 2>/dev/null || true
     
+    # 降低日志级别以节省内存和 CPU
+    warp-cli --accept-tos set-log-level warn 2>/dev/null || warp-cli set-log-level warn 2>/dev/null || true
+
     # 连接
     echo -e "正在连接 WARP..."
     warp-cli --accept-tos connect 2>/dev/null || warp-cli connect 2>/dev/null
@@ -664,6 +681,7 @@ do_uninstall() {
     systemctl disable --now warp-google 2>/dev/null
     systemctl disable --now warp-google-update.timer 2>/dev/null
     systemctl stop warp-svc 2>/dev/null
+    rm -rf /etc/systemd/system/warp-svc.service.d
     rm -f /etc/systemd/system/warp-google.service
     rm -f /etc/systemd/system/warp-google-update.service
     rm -f /etc/systemd/system/warp-google-update.timer
