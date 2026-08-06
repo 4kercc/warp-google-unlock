@@ -36,6 +36,47 @@ fi
 ARCH=$(dpkg --print-architecture 2>/dev/null || echo "amd64")
 echo -e "${GREEN}系统: $OS $VERSION ($CODENAME) $ARCH${NC}"
 
+# 自动检测并更换 Debian 最快镜像源
+optimize_mirror() {
+    [ "$OS" != "debian" ] && return
+
+    echo -e "\n${CYAN}正在检测 Debian 最快镜像源...${NC}"
+
+    local mirrors=(
+        "mirrors.aliyun.com"
+        "mirrors.tuna.tsinghua.edu.cn"
+        "mirrors.cloud.tencent.com"
+        "deb.debian.org"
+    )
+
+    local best_mirror="deb.debian.org"
+    local min_time=999
+
+    for mirror in "${mirrors[@]}"; do
+        local rtt
+        rtt=$(curl -o /dev/null -s -w '%{time_total}' --max-time 3 "http://${mirror}/debian/dists/${CODENAME}/Release" 2>/dev/null || echo "999")
+        if [ "$(echo "$rtt < $min_time" | bc -l 2>/dev/null || awk "BEGIN {print ($rtt < $min_time)}")" -eq 1 ]; then
+            min_time=$rtt
+            best_mirror=$mirror
+        fi
+    done
+
+    echo -e "${GREEN}✓ 选定最快镜像源: $best_mirror (延迟: ${min_time}s)${NC}"
+
+    if [ "$best_mirror" != "deb.debian.org" ]; then
+        if [ ! -f /etc/apt/sources.list.bak ]; then
+            cp /etc/apt/sources.list /etc/apt/sources.list.bak
+        fi
+
+        cat > /etc/apt/sources.list << EOF
+deb http://${best_mirror}/debian/ ${CODENAME} main contrib non-free non-free-firmware
+deb http://${best_mirror}/debian/ ${CODENAME}-updates main contrib non-free non-free-firmware
+deb http://${best_mirror}/debian-security/ ${CODENAME}-security main contrib non-free non-free-firmware
+EOF
+        echo -e "${GREEN}✓ 源已自动替换为 ${best_mirror}${NC}"
+    fi
+}
+
 # 显示当前 IP
 echo -e "\n${YELLOW}当前 IP 信息:${NC}"
 CURRENT_IP=$(curl -4 -s --max-time 5 ip.sb)
@@ -46,6 +87,9 @@ echo -e "位置: ${GREEN}$(echo $IP_INFO | grep -oP '"country":"\K[^"]+') - $(ec
 install_warp() {
     echo -e "\n${CYAN}[1/3] 检测/安装 Cloudflare WARP 官方客户端...${NC}"
     
+    # 检测并优化 Debian 源
+    optimize_mirror
+
     if command -v warp-cli &>/dev/null; then
         echo -e "${GREEN}✓ WARP 客户端已安装，跳过安装步骤${NC}"
         return
@@ -64,7 +108,7 @@ install_warp() {
             if [ ${#missing_pkgs[@]} -gt 0 ]; then
                 echo -e "正在安装缺失的依赖: ${missing_pkgs[*]}..."
                 apt-get update -y >/dev/null 2>&1
-                apt-get install -y "${missing_pkgs[@]}" >/dev/null 2>&1
+                apt-get install -y --no-install-recommends "${missing_pkgs[@]}" >/dev/null 2>&1
             fi
             
             # 添加 Cloudflare GPG 密钥
@@ -73,9 +117,9 @@ install_warp() {
             # 添加仓库
             echo "deb [arch=$ARCH signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $CODENAME main" > /etc/apt/sources.list.d/cloudflare-client.list
             
-            # 安装 Cloudflare WARP (由于新加了仓库，需要 update)
+            # 安装 Cloudflare WARP (使用 --no-install-recommends 避免拉取无关大包)
             apt-get update -y
-            apt-get install -y cloudflare-warp
+            apt-get install -y --no-install-recommends cloudflare-warp
             ;;
         centos|rhel|rocky|almalinux|fedora)
             # 添加仓库
@@ -126,7 +170,19 @@ EOF
         echo -e "${GREEN}✓ 已配置 warp-svc 内存上限 (MemoryMax=200M)${NC}"
     fi
 
-    # 注册设备
+    echo -e "正在等待 WARP ��护进程就绪..."
+    local daemon_ready=0
+    for i in {1..12}; do
+        local st
+        st=$(warp-cli --accept-tos status 2>/dev/null || echo "")
+        if [[ -n "$st" ]] && [[ "$st" != *"Daemon Startup"* ]]; then
+            daemon_ready=1
+            break
+        fi
+        sleep 1
+    done
+
+    # 自动接受隐私协议并注册设备
     echo -e "正在注册设备..."
     warp-cli --accept-tos registration new 2>/dev/null || warp-cli --accept-tos register 2>/dev/null || true
     
@@ -143,13 +199,26 @@ EOF
     echo -e "正在连接 WARP..."
     warp-cli --accept-tos connect 2>/dev/null || warp-cli connect 2>/dev/null
     
-    sleep 3
-    
-    # 显示状态
+    # 轮询等待连接成功 (最多等待 15 秒)
+    local connected=0
+    for i in {1..15}; do
+        local curr_status
+        curr_status=$(warp-cli --accept-tos status 2>/dev/null || echo "")
+        if [[ "$curr_status" == *"Connected"* ]]; then
+            connected=1
+            break
+        fi
+        sleep 1
+    done
+
     STATUS=$(warp-cli --accept-tos status 2>/dev/null || warp-cli status 2>/dev/null)
-    echo -e "状态: ${GREEN}$STATUS${NC}"
-    
-    echo -e "${GREEN}✓ WARP 配置完成${NC}"
+    if [ $connected -eq 1 ]; then
+        echo -e "状态: ${GREEN}$STATUS${NC}"
+        echo -e "${GREEN}✓ WARP 配置并连接成功${NC}"
+    else
+        echo -e "状态: ${YELLOW}$STATUS${NC}"
+        echo -e "${YELLOW}⚠ WARP 正在尝试建立连接，请稍候执行 warp status 检查${NC}"
+    fi
 }
 
 # 配置透明代理 (让 Google 流量自动走 WARP)
@@ -179,7 +248,7 @@ setup_transparent_proxy() {
             done
             if [ ${#missing_proxy_pkgs[@]} -gt 0 ]; then
                 echo -e "正在安装依赖: ${missing_proxy_pkgs[*]}..."
-                apt-get install -y "${missing_proxy_pkgs[@]}" >/dev/null 2>&1
+                apt-get install -y --no-install-recommends "${missing_proxy_pkgs[@]}" >/dev/null 2>&1
             fi
             ;;
         centos|rhel|rocky|almalinux|fedora)
@@ -317,7 +386,13 @@ check_proxy_ready() {
         echo "  警告: 未找到 curl，跳过 SOCKS5 健康检查"
         return 0
     fi
-    curl -x socks5h://127.0.0.1:40000 -s --max-time 8 https://www.cloudflare.com/cdn-cgi/trace >/dev/null 2>&1
+    for attempt in {1..6}; do
+        if curl -x socks5h://127.0.0.1:40000 -s --max-time 5 https://www.cloudflare.com/cdn-cgi/trace >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 1.5
+    done
+    return 1
 }
 
 start() {
