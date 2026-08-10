@@ -545,8 +545,25 @@ case "$1" in
     restart) stop; sleep 1; start ;;
     status) status ;;
     update) WARP_DYNAMIC_UPDATE=1; stop; sleep 1; start ;;
+    auto-fix)
+        echo "正在进行解锁状态自动巡检..."
+        # 运行检测，如果存在未解锁或请求失败的服务，自动触发 update 修复
+        check_output=$(check_services 2>&1)
+        echo "$check_output"
+        if echo "$check_output" | grep -qE "✗|受限|失败"; then
+            echo "检测到部分服务解锁失败或受限，正在自动从 BGP 刷新最新 IP 规则并修复..."
+            WARP_DYNAMIC_UPDATE=1
+            stop
+            sleep 1
+            start
+            echo "自动修复完成，重新验证："
+            check_services
+        else
+            echo "所有服务解锁状态良好，无需修复。"
+        fi
+        ;;
     check|test) check_services ;;
-    *) echo "用法: $0 {start|stop|restart|status|update|check}" ;;
+    *) echo "用法: $0 {start|stop|restart|status|update|auto-fix|check}" ;;
 esac
 SCRIPT
 
@@ -574,25 +591,25 @@ EOF
     systemctl daemon-reload
     systemctl enable warp-google 2>/dev/null
 
-    # 创建每 7 天自动重启的 systemd timer（仅重载安全内置列表；不会默认拉取全量 ASN）
+    # 创建每天自动巡检与智能修复的 systemd timer
     cat > /etc/systemd/system/warp-google-update.service << 'EOF'
 [Unit]
-Description=WARP Transparent Proxy Weekly Safe Restart
+Description=WARP Transparent Proxy Daily Auto Check and Fix
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/warp-google restart
+ExecStart=/usr/local/bin/warp-google auto-fix
 EOF
 
     cat > /etc/systemd/system/warp-google-update.timer << 'EOF'
 [Unit]
-Description=WARP Transparent Proxy Weekly Safe Restart
+Description=WARP Transparent Proxy Daily Auto-Fix Check
 
 [Timer]
 OnBootSec=10min
-OnUnitActiveSec=7d
+OnUnitActiveSec=1d
 Persistent=true
 
 [Install]
@@ -601,7 +618,7 @@ EOF
 
     systemctl daemon-reload
     systemctl enable --now warp-google-update.timer 2>/dev/null
-    echo -e "${GREEN}✓ 已启用每 7 天安全重载透明代理的定时任务${NC}"
+    echo -e "${GREEN}✓ 已启用每日自动巡检与智能修复定时任务 (warp auto-fix)${NC}"
     echo -e "${GREEN}✓ 透明代理配置完成${NC}"
 }
 
@@ -676,6 +693,9 @@ case "$1" in
         echo "提示: 全量 ASN 可能劫持更多流量，如网络异常请执行: warp stop"
         /usr/local/bin/warp-google update
         ;;
+    auto-fix)
+        /usr/local/bin/warp-google auto-fix
+        ;;
     uninstall)
         echo "正在卸载..."
         /usr/local/bin/warp-google stop 2>/dev/null
@@ -706,6 +726,7 @@ case "$1" in
         echo "  test      测试解锁状态 (同 check)"
         echo "  ip        查看 IP"
         echo "  update    全量 ASN 更新 IP 列表（高级功能）"
+        echo "  auto-fix  智能巡检解锁状态，失败时自动拉取 BGP 数据库修复"
         echo "  uninstall 卸载 WARP"
         ;;
 esac
@@ -938,8 +959,9 @@ show_menu() {
         echo -e "  ${GREEN}2.${NC} 卸载 WARP"
         echo -e "  ${GREEN}3.${NC} 查看状态与 IP 信息"
         echo -e "  ${GREEN}4.${NC} 多服务解锁综合检测 (Google/Gemini/ChatGPT/Netflix/Claude)"
+        echo -e "  ${GREEN}5.${NC} 运行智能巡检与自动修复 (解锁失败时自动 BGP 更新)"
         echo -e "  ${GREEN}0.${NC} 退出\n"
-        read -p "请输入选项 [0-4]: " choice
+        read -p "请输入选项 [0-5]: " choice
     fi
 
     case $choice in
@@ -947,6 +969,7 @@ show_menu() {
         2) do_uninstall ;;
         3) do_status; do_show_ip ;;
         4|check|test) do_check_services ;;
+        5|auto-fix) /usr/local/bin/warp-google auto-fix ;;
         0) echo -e "\n${GREEN}再见！${NC}\n"; exit 0 ;;
         *)
             echo -e "\n${RED}无效选项: '$choice'${NC}\n"
