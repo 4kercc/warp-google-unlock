@@ -1,6 +1,6 @@
 # 🌐 WARP 多服务透明代理一键脚本
 
-> 基于 Cloudflare WARP 实现 Google、Gemini、Netflix、ChatGPT、Claude 等 AI 与流媒体服务的**全局透明代理解锁**。无需客户端配置，服务器级别自动路由，支持多服务解锁检测、无人值守智能巡检与自动修复、内存防爆与智能换源。
+> 基于 Cloudflare WARP 实现 Google、Gemini、Netflix、ChatGPT、Claude 等 AI 与流媒体服务的**全局透明代理解锁**。无需客户端配置，服务器级别自动路由，支持多服务解锁检测、无人值守智能巡检与自动修复、内存防爆与保持系统原生源。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Shell](https://img.shields.io/badge/Shell-Bash-green.svg)]()
@@ -16,7 +16,7 @@
 | 🔍 **多服务解锁检测** | 提供 `warp check` 一键综合检测各大 AI 及流媒体服务的连通与解锁状态 |
 | 🤖 **无人值守智能修复** | 每日自动巡检 (`warp auto-fix`)，解锁失效时自动从 BGP 数据库刷新最新 IP 规则并自动修复 |
 | 🛡️ **内存泄漏防护** | 自动限制 `warp-svc` 内存上限 (`MemoryMax=200M`) 与关闭冗余日志，解决原生客户端爆内存 Bug |
-| ⚡ **智能镜像源加速** | 根据 VPS 所在国家/地区自动选源：中国大陆 VPS 自动选最快国内镜像，海外 VPS 保持官方 CDN |
+| 🔒 **保留原生软件源** | 严格保留服务器原有 APT/YUM 系统源，仅为 WARP 客户端在单独目录添加独立 repo 配置文件 |
 | 🔁 **开机自启** | systemd 服务管理，服务器重启后自动恢复 |
 | 📦 **完整卸载** | 一键清理所有组件、iptables 规则、systemd 服务与系统黑洞路由 |
 
@@ -148,7 +148,7 @@ journalctl -u warp-google-update.service -n 20
 - 🆕 **智能巡检与自动修复 (`warp auto-fix`)**：每日定时无感检测解锁情况，失效时自动刷新 BGP 数据库并修复。
 - 🆕 **多服务解锁综合检测 (`warp check`)**：一键检测 Google、Gemini、ChatGPT Web/API、Netflix、Claude 等连通与解锁状态。
 - 🛡️ **内存泄漏防护**：限制 `warp-svc` 内存上限为 200M，解决后台长久运行爆内存问题。
-- ⚡ **按国家/地区智能换源**：国内 VPS 自动测速换国内镜像，海外 VPS 保持官方 CDN，解决国外 VPS 误换国内源的问题。
+- 🔒 **原生软件源保护**：取消了 `optimize_mirror` 自动换源逻辑，彻底移除改源/换源代码，严格保留服务器原始系统源配置。
 - 🔒 **安全防环与断网防护**：重定向规则自动排除私网与本地地址，安装与启动阶段增加 SOCKS5 健康重试检查。
 
 ### v2.0.0

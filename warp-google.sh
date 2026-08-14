@@ -36,47 +36,6 @@ fi
 ARCH=$(dpkg --print-architecture 2>/dev/null || echo "amd64")
 echo -e "${GREEN}系统: $OS $VERSION ($CODENAME) $ARCH${NC}"
 
-# 自动检测并更换 Debian 最快镜像源
-optimize_mirror() {
-    [ "$OS" != "debian" ] && return
-
-    echo -e "\n${CYAN}正在检测 Debian 最快镜像源...${NC}"
-
-    local mirrors=(
-        "mirrors.aliyun.com"
-        "mirrors.tuna.tsinghua.edu.cn"
-        "mirrors.cloud.tencent.com"
-        "deb.debian.org"
-    )
-
-    local best_mirror="deb.debian.org"
-    local min_time=999
-
-    for mirror in "${mirrors[@]}"; do
-        local rtt
-        rtt=$(curl -o /dev/null -s -w '%{time_total}' --max-time 3 "http://${mirror}/debian/dists/${CODENAME}/Release" 2>/dev/null || echo "999")
-        if [ "$(echo "$rtt < $min_time" | bc -l 2>/dev/null || awk "BEGIN {print ($rtt < $min_time)}")" -eq 1 ]; then
-            min_time=$rtt
-            best_mirror=$mirror
-        fi
-    done
-
-    echo -e "${GREEN}✓ 选定最快镜像源: $best_mirror (延迟: ${min_time}s)${NC}"
-
-    if [ "$best_mirror" != "deb.debian.org" ]; then
-        if [ ! -f /etc/apt/sources.list.bak ]; then
-            cp /etc/apt/sources.list /etc/apt/sources.list.bak
-        fi
-
-        cat > /etc/apt/sources.list << EOF
-deb http://${best_mirror}/debian/ ${CODENAME} main contrib non-free non-free-firmware
-deb http://${best_mirror}/debian/ ${CODENAME}-updates main contrib non-free non-free-firmware
-deb http://${best_mirror}/debian-security/ ${CODENAME}-security main contrib non-free non-free-firmware
-EOF
-        echo -e "${GREEN}✓ 源已自动替换为 ${best_mirror}${NC}"
-    fi
-}
-
 # 显示当前 IP
 echo -e "\n${YELLOW}当前 IP 信息:${NC}"
 CURRENT_IP=$(curl -4 -s --max-time 5 ip.sb)
@@ -86,9 +45,6 @@ echo -e "位置: ${GREEN}$(echo $IP_INFO | grep -oP '"country":"\K[^"]+') - $(ec
 
 install_warp() {
     echo -e "\n${CYAN}[1/3] 检测/安装 Cloudflare WARP 官方客户端...${NC}"
-    
-    # 检测并优化 Debian 源
-    optimize_mirror
 
     if command -v warp-cli &>/dev/null; then
         echo -e "${GREEN}✓ WARP 客户端已安装，跳过安装步骤${NC}"
@@ -761,7 +717,7 @@ do_install() {
         echo -e "  warp-svc.service       : ${YELLOW}⚠ 未检测到（可能需要手动启用）${NC}"
     fi
     if systemctl is-enabled warp-google-update.timer &>/dev/null; then
-        echo -e "  warp-google-update.timer: ${GREEN}✓ 每 7 天自动更新 IP${NC}"
+        echo -e "  warp-google-update.timer: ${GREEN}✓ 每日自动巡检与智能修复${NC}"
     else
         echo -e "  warp-google-update.timer: ${RED}✗ 定时更新未启用${NC}"
     fi
