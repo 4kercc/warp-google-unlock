@@ -145,7 +145,8 @@ journalctl -u warp-google-update.service -n 20
 ## 📜 更新日志
 
 ### v3.0.0 (最新)
-- 🆕 **智能巡检与自动修复 (`warp auto-fix`)**：每日定时无感检测解锁情况，失效时自动刷新 BGP 数据库并修复。
+- 🆕 **智能巡检与自动降级修复 (`warp auto-fix`)**：每日定时无感检测解锁与代理连通性，当 WARP 故障连不上时自动解挂劫持规则降级恢复服务器本机直连，解锁失效时自动从 BGP 刷新规则修复。
+- 🛡️ **电脑端 QUIC (UDP 443) 阻断**：自动拒绝匹配目标的 UDP 443 请求，强制 Chrome/Edge 降级为 TCP，解决手机能上网而电脑端超时打不开的问题。
 - 🆕 **多服务解锁综合检测 (`warp check`)**：一键检测 Google、Gemini、ChatGPT Web/API、Netflix、Claude 等连通与解锁状态。
 - 🛡️ **内存泄漏防护**：限制 `warp-svc` 内存上限为 200M，解决后台长久运行爆内存问题。
 - 🔒 **原生软件源保护**：取消了 `optimize_mirror` 自动换源逻辑，彻底移除改源/换源代码，严格保留服务器原始系统源配置。

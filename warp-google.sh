@@ -392,7 +392,9 @@ start() {
         iplist=${SERVICE_IPS[$svc]}
         local count=0
         for ip in $iplist; do
-            iptables -t nat -A "$chain" -d "$ip" -p tcp -j REDIRECT --to-ports 12345
+            # 禁用 QUIC (UDP 443)，迫使 Chrome/Edge 电脑端浏览器 100% 降级到 TCP，解决电脑端卡死
+            iptables -t filter -A OUTPUT -d "$ip" -p udp --dport 443 -j REJECT 2>/dev/null || true
+            iptables -t nat -A "$chain" -d $ip -p tcp -j REDIRECT --to-ports 12345
             ((count++))
         done
         iptables -t nat -C OUTPUT -j "$chain" 2>/dev/null || iptables -t nat -A OUTPUT -j "$chain"
@@ -404,6 +406,13 @@ start() {
 stop() {
     echo "停止多服务透明代理..."
     cleanup_rules
+    # 清理 QUIC 阻断规则
+    for svc in "${!SERVICE_IPS[@]}"; do
+        iplist=${SERVICE_IPS[$svc]}
+        for ip in $iplist; do
+            iptables -t filter -D OUTPUT -d "$ip" -p udp --dport 443 -j REJECT 2>/dev/null || true
+        done
+    done
     pkill redsocks 2>/dev/null || true
     echo "多服务透明代理已停止"
 }
@@ -502,8 +511,18 @@ case "$1" in
     status) status ;;
     update) WARP_DYNAMIC_UPDATE=1; stop; sleep 1; start ;;
     auto-fix)
-        echo "正在进行解锁状态自动巡检..."
-        # 运行检测，如果存在未解锁或请求失败的服务，自动触发 update 修复
+        echo "正在进行解锁状态与代理连通性巡检..."
+        if ! check_proxy_ready; then
+            echo "警告: WARP 代理 (127.0.0.1:40000) 连通性异常，正在临时清理劫持规则并尝试重启 WARP..."
+            cleanup_rules
+            warp-cli connect 2>/dev/null || true
+            sleep 3
+            if ! check_proxy_ready; then
+                echo "错误: WARP 仍无法连接，已自动解挂透明代理规则，恢复服务器本机直连网络！"
+                exit 0
+            fi
+        fi
+
         check_output=$(check_services 2>&1)
         echo "$check_output"
         if echo "$check_output" | grep -qE "✗|受限|失败"; then
